@@ -1,0 +1,336 @@
+#! /usr/bin/env bash
+##############################################################################
+#
+# Quantitative Imaging Toolkit (QIT) (c) 2019 Ryan Cabeen
+# All rights reserved.
+#
+# The Software remains the property of Ryan Cabeen ("the Author").
+#
+# The Software is distributed "AS IS" under this Licence solely for
+# non-commercial use in the hope that it will be useful, but in order
+# that the Author as a charitable foundation protects its assets for
+# the benefit of its educational and research purposes, the Author
+# makes clear that no condition is made or to be implied, nor is any
+# warranty given or to be implied, as to the accuracy of the Software,
+# or that it will be suitable for any particular purpose or for use
+# under any specific conditions. Furthermore, the Author disclaims
+# all responsibility for the use which is made of the Software. It
+# further disclaims any liability for the outcomes arising from using
+# the Software.
+#
+# The Licensee agrees to indemnify the Author and hold the
+# Author harmless from and against any and all claims, damages and
+# liabilities asserted by third parties (including claims for
+# negligence) which arise directly or indirectly from the use of the
+# Software or the sale of any products based on the Software.
+#
+# No part of the Software may be reproduced, modified, transmitted or
+# transferred in any form or by any means, electronic or mechanical,
+# without the express permission of the Author. The permission of
+# the Author is not required if the said reproduction, modification,
+# transmission or transference is done without financial return, the
+# conditions of this Licence are imposed upon the receiver of the
+# product, and all original and amended source code is included in any
+# transmitted product. You may be held legally responsible for any
+# copyright infringement that is caused or encouraged by your failure to
+# abide by these terms and conditions.
+#
+# You are not permitted under this Licence to use this Software
+# commercially. Use for which any financial return is received shall be
+# defined as commercial use, and includes (1) integration of all or part
+# of the source code or the Software into a product for sale or license
+# by or on behalf of Licensee to third parties or (2) use of the
+# Software or any derivative of it for research with the final aim of
+# developing software products for sale or license to a third party or
+# (3) use of the Software or any derivative of it for research with the
+# final aim of developing non-software products for sale or license to a
+# third party, or (4) use of the Software to provide any service to an
+# external organisation for which payment is received.
+#
+##############################################################################
+
+factor=20
+min=0.075
+disperse=0.15
+angle=45
+smooth=2.0
+cluster=1
+density=4
+count=10000
+samples=1
+lambda=2
+maxsamples=1000000
+maxseeds=300000
+
+myleft=
+myright=
+output=
+final=
+
+usage()
+{
+    echo "
+Name: $(basename $0)
+
+Description:
+
+  Initialize a bundle definition
+    
+Usage: 
+
+  $(basename $0) [opts] --left <str> --right <str> --output <output>
+
+Required: 
+
+  --left <str>:      the first set of regions for querying the bundle 
+  --right <str>:     the second set of regions for querying the bundle 
+  --output <dir>:    the output directory
+
+Optional: 
+
+  --final:           finalize the seed and exclude masks and final bundle
+
+Author: Ryan Cabeen, cabeen@gmail.com
+"
+
+exit 1
+}
+
+if [ $# -eq 0 ]; then usage; fi
+
+posit=""
+cmd="$@"
+
+echo "cmd: ${cmd}"
+
+while [ "$1" != "" ]; do
+  case $1 in
+    --min)        shift; min=$1 ;;
+    --disperse)   shift; disperse=$1 ;;
+    --angle)      shift; angle=$1 ;;
+    --smooth)     shift; smooth=$1 ;;
+    --density)    shift; density=$1 ;;
+    --samples)    shift; samples=$1 ;;
+    --maxsamples) shift; maxsamples=$1 ;;
+    --factor)     shift; factor=$1 ;;
+    --count)      shift; count=$1 ;;
+    --left)       shift; myleft=$1 ;;
+    --right)      shift; myright=$1 ;;
+    --output)     shift; output=$1 ;;
+    --final)      final=1 ;;
+    --help )      usage ;;
+    -* | --*)     echo "unknown flag: $1"; usage ;;
+    * )           posit+=" $1" ;;
+  esac
+  shift
+done
+
+echo posit: ${posit}
+
+error()
+{
+  echo "error: $@"; exit 1;
+}
+
+root=$(cd $(dirname ${0}) ; cd .. ; pwd -P )
+masks=${root}/data/masks
+tone=${root}/data/tone.nii.gz
+
+if [[ "${posit}" != "" ]]; then error "bad arguments: ${posit}";  fi 
+if [[ "${output}" == "" ]]; then echo "error: output is missing!"; fi 
+
+left=${output}/left.nii.gz
+right=${output}/right.nii.gz
+end=${output}/end.nii.gz
+seed=${output}/seed.nii.gz
+seeds=${output}/seeds.txt.gz
+exclude=${output}/exclude.nii.gz
+include=${output}/include.nii.gz
+guide=${output}/guide.vtk.gz
+curves=${output}/curves.vtk.gz
+simple=${output}/simple.vtk.gz
+tom=${output}/tom.nii.gz
+proto=${output}/proto.vtk.gz
+
+runqit="qit --verbose --debug -Xmx6G"
+template=$(cd $(dirname $(which qit))/..; pwd)/share/data
+
+base=run_$(date +%Y-%m-%d_%H.%M.%S)
+
+mkdir -p ${output}
+
+log()
+{
+  echo "$@" 
+}
+
+log "started $(basename $0)" 
+log "... parameters:"
+log "...... using left: ${left}" 
+log "...... using right: ${right}" 
+log "...... using output: ${output}" 
+log "... options:"
+log "...... using final: ${final}" 
+log "... running"
+
+makemask()
+{
+  echo "extracting: ${1}"
+
+  ${runqit} MaskCat \
+   --input $(echo ${1} | sed 's/,/ /g' | xargs -n 1 | sed 's:.*:'${masks}'/&.nii.gz:g') \
+   --output ${2} \
+   2>&1 | tee -a ${mylog}
+
+  ${runqit} MaskBinarize \
+   --input ${2} \
+   --output ${2} \
+   2>&1 | tee -a ${mylog}
+}
+
+if [ ! -e ${end} ]; then
+	if [[ "${myleft}" == "" || "${myright}" == "" ]]; then 
+		error "left and right argument are needed!"; 
+	fi 
+
+	if [ ! -e ${left} ]; then
+		makemask ${myleft} ${left}
+	fi
+
+	if [ ! -e ${right} ]; then
+		makemask ${myright} ${right}
+	fi
+
+  ${runqit} MaskCat \
+    --input ${left} ${right} \
+    --output ${end}
+
+  rm ${left} ${right}
+fi
+
+if [ ! -e ${include} ]; then
+  log "...... creating empty include mask"
+  ${runqit} MaskSet \
+    --clear \
+    --input ${end} \
+    --output ${include}
+fi
+
+if [ ! -e ${guide} ]; then
+  # --stopMask data/csf.nii.gz \
+  log "...... running guide tractography"
+  ${runqit} VolumeModelTrackStreamline --threads 12 \
+    --input ${template}/models.xfib \
+    --seedMask ${end} \
+    --includeMask ${include} \
+    --includeAddMask ${end} \
+    --connectMask ${end} \
+    --endMask ${end} \
+    --interp Nearest \
+    --maxlen 10000 \
+    --min ${min} \
+    --samplesFactor ${factor} \
+    --angle ${angle} \
+    --disperse ${disperse} \
+    --prob \
+    --output ${guide}
+fi 
+
+if [ ${final} ]; then
+  echo "... running final steps"
+
+  if [ -e ${guide} ] && [ ! -e ${seed} ]; then
+    ${runqit} CurvesMask \
+      --input ${guide} \
+      --refvolume ${end} \
+      --output ${seed}
+
+    ${runqit} MaskDilate \
+      --input ${seed} \
+      --output ${seed}
+  fi
+
+  if [ ! -e ${seeds} ]; then
+    ${runqit} MaskSampleVects \
+      --vects-format %0.3d \
+      --limit ${maxsamples} \
+      --count ${samples} \
+      --input ${seed} \
+      --output ${seeds}
+    ${runqit} VectsClusterKMeans \
+      --lambda ${lambda} \
+      --input ${seeds} \
+      --centers ${seeds}
+    ${runqit} VectsTransform \
+      --perm 0,1,2 \
+      --input ${seeds} \
+      --output ${seeds}
+  fi
+
+  if [ ! -e ${exclude} ]; then
+    log "...... creating exclude mask"
+    ${runqit} MaskDilate \
+      --num 10 \
+      --input ${seed} \
+      --output ${exclude}
+
+    ${runqit} MaskInvert \
+      --input ${exclude} \
+      --output ${exclude}
+  fi
+
+  if [ ! -e ${tom} ]; then
+    log "...... running final tractography"
+    ${runqit} VolumeModelTrackStreamline --threads 2 \
+      --input ${template}/models.xfib \
+      --seedMask ${seed} \
+      --includeMask ${include} \
+      --includeAddMask ${end} \
+      --excludeMask ${exclude} \
+      --trapMask ${end} \
+      --endMask ${end} \
+      --min ${min} \
+      --interp Trilinear \
+      --maxlen 10000 \
+      --maxseeds ${maxseeds} \
+      --samplesFactor 1.0 \
+      --disperse 0.05 \
+      --angle 90 \
+      --hybrid \
+      --hybridCurves ${guide} \
+      --hybridPresmooth ${smooth} \
+      --hybridPostsmooth ${smooth} \
+      --output ${curves}
+		${runqit} CurvesOrientationMap \
+			--input ${curves} \
+			--refvolume ${tone} \
+			--smooth \
+			--sigma ${smooth} \
+			--orient \
+			--vector \
+			--output ${tom}
+		${runqit} CurvesReduce \
+			--input ${curves} \
+			--count ${count} \
+			--output ${curves}
+		${runqit} CurvesClusterQuickBundle \
+			--input ${curves} \
+			--thresh ${cluster} \
+			--centers ${curves}
+		${runqit} CurvesSegmentAlong \
+			--input ${curves} \
+			--density ${density} \
+			--outputProto ${proto} \
+			--output ${curves}
+		${runqit} CurvesAttributes \
+			--input ${curves} \
+			--retain coord,label \
+			--output ${curves}
+  fi
+fi
+
+log "finished $(basename $0)"
+
+##############################################################################
+# End of file
+##############################################################################
